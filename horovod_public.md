@@ -34,7 +34,7 @@
 
 ​		最近有一些需求是跟分布式训练相关的，然后自己重新看了一下 horovod 的代码，感觉还是有一些不清晰的地方，所以尝试把自己的一些理解写下来，可能是更加好的实践，下面算是我自己的一些对 Horovod 源码的笔记，不能保证很准确，如果有错误或者模糊的地方也希望大家可以多多指正。
 
-​		Horovod 是 Uber 开源的深度学习工具，它的发展吸取了Facebook "Training ImageNet In 1 Hour" 与百度 "Ring Allreduce" 的优点，在保证分布式训练性能的同时，兼顾了前端的简洁和对不同深度学习框架的支持，使用起来对开发人员比较的友好，算是分布式训练方向的标杆项目了。本文对 horovod 的介绍，会从比较底层的集合通信库开始讲起，因为我自己是做图像算法出身的，后面会从一个 pytorch 的 horovod 训练程序开始解析它的工作流程，所以这里可能会假设读者是有一些深度学习的背景知识，或者对 TensorFlow 和 Pytorch 等深度学习框架有一些了解。这里也顺道推荐一下大家读一下@gaocegege的这篇 [MPI，OpenMPI 与深度学习](https://zhuanlan.zhihu.com/p/158584571) 文章，感觉写得很精彩，深入浅出，我自己也受到了很多的启发。那下面我们就开始先说一下集合通信库，如果之前对相关的概念有所了解的话，这部分可以先跳过，直接从 [Horovod 流程分析](#Horovod 流程分析)的例子开始看起。
+​		Horovod 是 Uber 开源的深度学习工具，它的发展吸取了Facebook "Training ImageNet In 1 Hour" 与百度 "Ring Allreduce" 的优点，在保证分布式训练性能的同时，兼顾了前端的简洁和对不同深度学习框架的支持，使用起来对开发人员比较的友好，算是分布式训练方向的标杆项目了。本文对 horovod 的介绍，会从比较底层的集合通信库开始讲起，因为我自己是做图像算法出身的，后面会从一个 pytorch 的 horovod 训练程序开始解析它的工作流程，所以这里可能会假设读者是有一些深度学习的背景知识，或者对 TensorFlow 和 Pytorch 等深度学习框架有一些了解。这里也顺道推荐一下大家读一下@gaocegege的这篇 [MPI，OpenMPI 与深度学习](https://zhuanlan.zhihu.com/p/158584571) 文章，感觉写得很精彩，深入浅出，我自己也受到了很多的启发。那下面我们就开始先说一下集合通信库，如果之前对相关的概念有所了解的话，这部分可以先跳过，直接从 [Horovod 流程分析](#Horovod流程分析)的例子开始看起。
 
 ## 集合通信库
 
@@ -778,20 +778,16 @@ private:
 };
 
 ```
-
-
-
 ## 总结
 
-horovod 的流程分析大概就是这样，没有特别复杂，代码的阅读体验也是比较好的，在主流程的关键函数都有比较清晰的注释。对于第三方开发者来说，horovod 本身已经用了很多提高性能的 tricks，可以 custom 优化的地方不多，一些可以动的参数，也已经提供了autotuning，直接使用就可以得到很好的性能。上面的分析也有很多是我自己阅读代码时候的一些思考可能不一定准确，如果有不准确或者模糊的地方，也希望大家可以多多斧正。
+horovod 的流程分析大概就是这样，没有特别复杂，代码的阅读体验也是比较好的，在主流程的关键函数都有比较清晰的注释。对于第三方开发者来说，horovod 本身已经用了很多提高性能的 tricks，可以 custom 优化的地方不多，一些可以动的参数，也已经提供了autotuning，直接使用就可以得到很好的性能。如果尝试优化，可能要从传输上着手，如 BytePS 会尝试使用不同的网络拓扑引入一些 PS 节点提高带宽等，如果有时间我也会聊一下这个。另外上面的分析也有很多是我自己阅读代码时候的一些思考可能不一定准确，如果有不准确或者模糊的地方，也希望大家可以多多斧正。
 
-## Reference 
+## 参考资料 
 
-1.  [Horovod]((https://github.com/horovod/horovod))
+1.  [Horovod](https://github.com/horovod/horovod)
 2.  [MPI，OpenMPI 与深度学习](https://zhuanlan.zhihu.com/p/158584571)   
 3.  [腾讯机智团队分享--AllReduce算法的前世今生](https://zhuanlan.zhihu.com/p/79030485)
 4.  [WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html)
 5.  [OpenMPI](https://www.open-mpi.org/)
 6.  [Bringing HPC Techniques to Deep Learning](https://andrew.gibiansky.com/blog/machine-learning/baidu-allreduce/)
 7.  [Pytorch Document](https://pytorch.org/docs/stable/index.html)
-
