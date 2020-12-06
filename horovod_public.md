@@ -1,12 +1,40 @@
 # Horovod 源码分析
 
-[TOC]
+  - [Horovod 源码分析](#Horovod 源码分析)
+    - [前言](#前言)
+    - [集合通信库](#集合通信库)
+      - [点对点通信 ](#点对点通信 )
+      - [集合通信](#集合通信)
+      - [实践](#实践)
+        - [Pytorch.distributed](#Pytorch.distributed)
+        - [send/recv](#send/recv)
+        - [all_reduce](#all_reduce)
+        - [gpu_all_reduce](#gpu_all_reduce)
+        - [多terminal尝试](#多terminal尝试)
+        - [MPI ](#MPI )
+    - [Horovod流程分析](#Horovod流程分析)
+      - [pytorch_demo](#pytorch_demo)
+      - [流程分析](#流程分析)
+        - [1.hvd.init()->InitializeHorovodOnce](#1.hvd.init()->InitializeHorovodOnce)
+        - [2.BackgroundThreadLoop](#2.BackgroundThreadLoop)
+        - [3.Optimizer.step()->DoAllReduce](#3.Optimizer.step()->DoAllReduce)
+        - [4.RunLoopOnce](#4.RunLoopOnce)
+        - [5.PerformOperation](#5.PerformOperation)
+        - [6.parameter_manager.update](#6.parameter_manager.update)
+      - [其他关键模块](#其他关键模块)
+        - [Parameter_manager](#Parameter_manager)
+        - [MPIContext](#MPIContext)
+        - [Tensorflow2 ](#Tensorflow2 )
+    - [总结](#总结)
+    - [Reference ](#Reference )
+
+
 
 ## 前言
 
 ​		最近有一些需求是跟分布式训练相关的，然后自己重新看了一下 horovod 的代码，感觉还是有一些不清晰的地方，所以尝试把自己的一些理解写下来，可能是更加好的实践，下面算是我自己的一些对 Horovod 源码的笔记，不能保证很准确，如果有错误或者模糊的地方也希望大家可以多多指正。
 
-​		Horovod 是 Uber 开源的深度学习工具，它的发展吸取了Facebook "Training ImageNet In 1 Hour" 与百度 "Ring Allreduce" 的优点，在保证分布式训练性能的同时，兼顾了前端的简洁和对不同深度学习框架的支持，使用起来对开发人员比较的友好，算是分布式训练方向的标杆项目了。本文对 horovod 的介绍，会从比较底层的集合通信库开始讲起，因为我自己是做图像算法出身的，后面会从一个 pytorch 的 horovod 训练程序开始解析它的工作流程，所以这里可能会假设读者是有一些深度学习的背景知识，或者对 TensorFlow 和 Pytorch 等深度学习框架有一些了解。这里也顺道推荐一下大家读一下@gaocegege的这篇 [MPI，OpenMPI 与深度学习](https://zhuanlan.zhihu.com/p/158584571) 文章，感觉写得很精彩，深入浅出，我自己也受到了很多的启发。那下面我们就开始先说一下集合通信库，如果之前对相关的概念有所了解的话，这部分可以先跳过，直接从 **Horovod流程分析**的例子开始看起。
+​		Horovod 是 Uber 开源的深度学习工具，它的发展吸取了Facebook "Training ImageNet In 1 Hour" 与百度 "Ring Allreduce" 的优点，在保证分布式训练性能的同时，兼顾了前端的简洁和对不同深度学习框架的支持，使用起来对开发人员比较的友好，算是分布式训练方向的标杆项目了。本文对 horovod 的介绍，会从比较底层的集合通信库开始讲起，因为我自己是做图像算法出身的，后面会从一个 pytorch 的 horovod 训练程序开始解析它的工作流程，所以这里可能会假设读者是有一些深度学习的背景知识，或者对 TensorFlow 和 Pytorch 等深度学习框架有一些了解。这里也顺道推荐一下大家读一下@gaocegege的这篇 [MPI，OpenMPI 与深度学习](https://zhuanlan.zhihu.com/p/158584571) 文章，感觉写得很精彩，深入浅出，我自己也受到了很多的启发。那下面我们就开始先说一下集合通信库，如果之前对相关的概念有所了解的话，这部分可以先跳过，直接从 [Horovod 流程分析](#Horovod 流程分析)的例子开始看起。
 
 ## 集合通信库
 
@@ -20,25 +48,25 @@ Send / Recv
 
 图源[WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html)
 
-### 集合通信：
+### 集合通信
 
 Scatter / Gather 
 
 ![22](horovod_public/2.png)
 
-图源[WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html)
+图源([WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html))https://pytorch.org/tutorials/intermediate/dist_tuto.html)
 
 Reduce/ Allreduce
 
 ![33](horovod_public/3.png)
 
-图源[WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html)
+图源([WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html))
 
 Broadcast / All-gather 
 
 ![4](horovod_public/4.png)
 
-图源[WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html)
+图源([WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html))
 
 这里在机器学习训练中使用比较多的是 **all-reduce**，场景类似在不同的 node 上跑不同 batch 的数据，然后更新梯度需要从各个汇总之后平均再回传到各自的 node 中。而这部分，有很多种实现的方式，比较直观和简单的是把所有的梯度都汇总到的某一个 node 上（如下图 **node d** 所示），然后再把汇总的信息重新分发到不同的 node 上 ，这样可以计算通信量，如下：对于 P 个节点，每个节点消息大小为 M，**node d** 节点的通信量为 2*(P-1)M，这里假设节点之间互联互通，带宽为B。
 
@@ -243,7 +271,7 @@ def run_multigpu_allreduce(rank, size):
 - 对不同的进程分别把 tensor 初始化在不同的 gpu 上，rank0 初始化在 0，1 gpu 上，rank 1 在 2，3上。
 - 进行一次 all_reduce_multigpu （这个函数跟 all_reduce 不同，是把不同的 node 上不同的gpu 上的tensor 都放到一个 list 中，进行reduce），这时所有 gpu 上的值都是4，作为对比，我们对 tensor_list[0] 的tensor 做一次all_reduce，得到的结果在 gpu 0,2 上的 tensor 进行了all_reduce 结果是 8，在 gpu 1,3 的 tensor 没有任何变化。
 
-#### 多 terminal 尝试
+#### 多terminal尝试
 
 在验证分布式逻辑的时候，其实我们不一定需要多台机子才可以，对一些不涉及网络性能的验证，可以尝试在一台机子上开多个 terminal 进行验证。可以使用上面的例子，在多个 terminal 下跑以下命令。
 
@@ -277,11 +305,11 @@ Rank  1  has data tensor[0]: tensor([8.], device='cuda:2') , tensor[1]: tensor([
 
 
 
-## Horovod 流程分析
+## Horovod流程分析
 
 下面我会以一个简单的 pytorch horovod 的 demo 尝试去理解一下 horovod 的工作机理，demo 如下（省略了一些不关键的代码段）。为了准确起见，我们是根据 horovod v0.20.3 的版本进行阅读的，如果是其他版本，可能会跟这里的内容有一些出入。
 
-### pytorch demo
+### pytorch_demo
 
 一般的 horovod 训练程序都会包含以下几个关键步骤：
 
@@ -362,7 +390,7 @@ for x in range(args.num_iters):
 
 我们下面以使用 mpi_controller 进行 allreduce 操作进行分析。
 
-#### 1. hvd.init() -> InitializeHorovodOnce
+#### 1.hvd.init()->InitializeHorovodOnce
 
 首先，hvd.init() 会通过一系列的调用和配置最终调用 horovod/common/operations.cc 下的 InitializeHorovodOnce 函数，这个函数会根据加载的集合通讯库（mpi 或者 gloo）为 globalstate 创建对应的 controller，然后使用 BackgroundThreadLoop 启动一个后台线程。 
 
@@ -401,7 +429,7 @@ void InitializeHorovodOnce(const int* ranks, int nranks) {
 }
 ```
 
-#### 2.  BackgroundThreadLoop
+#### 2.BackgroundThreadLoop
 
 BackgroundThreadLoop 会为 GlobalState 初始化一系列包括初始化 mpi_context， controller，的元素，然后轮询调用 RunLoopOnce，还有一些对 RunLoopOnce 结束后的后处理。
 
@@ -449,7 +477,7 @@ void BackgroundThreadLoop(HorovodGlobalState& state) {
 }
 ```
 
-#### 3. Optimizer.step() -> DoAllReduce
+#### 3.Optimizer.step()->DoAllReduce
 
 这里我们先不急着看 RunLoopOnce 函数，先回到 InitializeHorovodOnce ，因为上面的 **initialization_done = True**，所以 InitializeHorovodOnce 可以退出了，就是前端的 hvd.init() 可以进行下一步了。这里 main.py 走完前向 loss = model(data,target)，后向逻辑 loss.backward()，调用 optimizer.step() 进行梯度同步。optimizer.step() 会通过一系列的调用和处理（如：compression 等操作）最终会调用 C++ interface 的 **DoAllReduce** 函数。
 
@@ -502,7 +530,7 @@ Status EnqueueTensorAllreduce(std::shared_ptr<OpContext> context,
 }
 ```
 
-#### 4. RunLoopOnce
+#### 4.RunLoopOnce
 
 回到后台线程 BackgroundThreadLoop，后面会轮询调用 RunLoopOnce。 RunLoopOnce会首先调用 **ComputeResponseList** 函数，其主要工作是同步不同 worker 之间的需要 allreduce 的 tensors，为后面 allreduce 的执行做好准备。
 
@@ -565,7 +593,7 @@ void MPIController::RecvFinalTensors(ResponseList& response_list) {
 }
 ```
 
-#### 5. PerformOperation
+#### 5.PerformOperation
 
 从 ComputeResponseList 继续跑 RunLoopOnce， 不同 node 下面会根据前面 ComputeResponseList 返回的 response_list 对每个 response 轮询调用 PerformOperation 完成对应的 reduce 工作。
 
@@ -642,7 +670,7 @@ void PerformOperation(Response response, HorovodGlobalState& state) {
 
 -   然后调用不同 entries 的 callback，这里 callback 一般是给前端作相应的。
 
-#### 6. parameter_manager.update
+#### 6.parameter_manager.update
 
 完成上述步骤之后，如果设置了 state.parameter_manager.IsAutoTuning()，RunLoopOnce 还会调用相关的逻辑，调整传输的参数，然后返回 BackgroundThreadLoop 重新调用。重新调用时会睡一定时间再继续上述第 3 - 5 步的工作。
 
