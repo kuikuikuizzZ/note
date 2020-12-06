@@ -1,32 +1,44 @@
 # Horovod 源码分析
 
+[TOC]
+
+## 前言
+
 ​		最近有一些需求是跟分布式训练相关的，然后自己重新看了一下 horovod 的代码，感觉还是有一些不清晰的地方，所以尝试把自己的一些理解写下来，可能是更加好的实践，下面算是我自己的一些对 Horovod 源码的笔记，不能保证很准确，如果有错误或者模糊的地方也希望大家可以多多指正。
 
-​		Horovod 是 Uber 开源的深度学习工具，它的发展吸取了Facebook "Training ImageNet In 1 Hour" 与百度 "Ring Allreduce" 的优点，在保证分布式训练性能的同时，兼顾了前端的简洁和对不同深度学习框架的支持，使用起来对开发人员比较的友好，算是分布式训练方向的标杆项目了。本文对 horovod 的介绍，会从比较底层的集合通信库开始讲起，因为我自己是做图像算法出身的，后面会从一个 pytorch 的 horovod 训练程序开始解析它的工作流程，所以这里可能会假设读者是有一些深度学习的背景知识，或者对 TensorFlow 和 Pytorch 等深度学习框架有一些了解。这里也顺道推荐一下大家读一下@gaocegege的这篇 [MPI，OpenMPI 与深度学习](https://zhuanlan.zhihu.com/p/158584571) 文章，感觉写得很精彩，深入浅出，我自己也受到了很多的启发。那下面我们就开始先说一下集合通信库，如果之前对相关的概念有所了解的话，这部分可以先跳过，直接从 pytorch 的例子开始看起。
+​		Horovod 是 Uber 开源的深度学习工具，它的发展吸取了Facebook "Training ImageNet In 1 Hour" 与百度 "Ring Allreduce" 的优点，在保证分布式训练性能的同时，兼顾了前端的简洁和对不同深度学习框架的支持，使用起来对开发人员比较的友好，算是分布式训练方向的标杆项目了。本文对 horovod 的介绍，会从比较底层的集合通信库开始讲起，因为我自己是做图像算法出身的，后面会从一个 pytorch 的 horovod 训练程序开始解析它的工作流程，所以这里可能会假设读者是有一些深度学习的背景知识，或者对 TensorFlow 和 Pytorch 等深度学习框架有一些了解。这里也顺道推荐一下大家读一下@gaocegege的这篇 [MPI，OpenMPI 与深度学习](https://zhuanlan.zhihu.com/p/158584571) 文章，感觉写得很精彩，深入浅出，我自己也受到了很多的启发。那下面我们就开始先说一下集合通信库，如果之前对相关的概念有所了解的话，这部分可以先跳过，直接从 **Horovod流程分析**的例子开始看起。
 
 ## 集合通信库
 
 集合通信库，这个词可能听起来会比较的陌生，不过如果我再提几个关键字，可能大家多少都会有所耳闻。资历比较老的是 MPI ([Message Passing Interface ](https://en.wikipedia.org/wiki/Message_Passing_Interface))，及其实现 [OpenMPI](https://www.open-mpi.org/) 和 [MPICH](https://www.mpich.org/)，年轻一点的会是 Nvidia 针对其显卡开源的 [NCCL](https://github.com/NVIDIA/nccl)，或者是 facebook 开源的 [gloo](https://github.com/facebookincubator/gloo)，或者是像华为针对其高性能硬件提供的HCCL，大体上都可以归入到集合通信库的类别。他们相同的地方是大体上会遵照 MPI 提供的接口规定，实现了包括点对点通信（SEND,RECV等），集合通信（ REDUCE，BROADCAST，ALLREDUCE等）等相关接口，然后根据自己硬件或者是系统的需要，在底层实现上进行了相应的改动，保证接口的稳定和性能。我们先大致地过一遍相关的一些概念。
 
-#### 点对点通信 
+### 点对点通信 
 
 Send / Recv
 
 ![1](horovod_public/1.png)
 
-#### 集合通信：
+图源[WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html)
+
+### 集合通信：
 
 Scatter / Gather 
 
 ![22](horovod_public/2.png)
 
+图源[WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html)
+
 Reduce/ Allreduce
 
 ![33](horovod_public/3.png)
 
+图源[WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html)
+
 Broadcast / All-gather 
 
 ![4](horovod_public/4.png)
+
+图源[WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html)
 
 这里在机器学习训练中使用比较多的是 **all-reduce**，场景类似在不同的 node 上跑不同 batch 的数据，然后更新梯度需要从各个汇总之后平均再回传到各自的 node 中。而这部分，有很多种实现的方式，比较直观和简单的是把所有的梯度都汇总到的某一个 node 上（如下图 **node d** 所示），然后再把汇总的信息重新分发到不同的 node 上 ，这样可以计算通信量，如下：对于 P 个节点，每个节点消息大小为 M，**node d** 节点的通信量为 2*(P-1)M，这里假设节点之间互联互通，带宽为B。
 
@@ -265,7 +277,7 @@ Rank  1  has data tensor[0]: tensor([8.], device='cuda:2') , tensor[1]: tensor([
 
 
 
-## Horvod 流程分析
+## Horovod 流程分析
 
 下面我会以一个简单的 pytorch horovod 的 demo 尝试去理解一下 horovod 的工作机理，demo 如下（省略了一些不关键的代码段）。为了准确起见，我们是根据 horovod v0.20.3 的版本进行阅读的，如果是其他版本，可能会跟这里的内容有一些出入。
 
@@ -365,7 +377,7 @@ void InitializeHorovodOnce(const int* ranks, int nranks) {
         horovod_global.control_operation == LibType::MPI) {
       mpi_context.Enable();
     }
-  	// 创建一个 MPIController 对象
+    // 创建一个 MPIController 对象
     if (horovod_global.control_operation == LibType::MPI){
       horovod_global.controller.reset(new MPIController(
           horovod_global.response_cache,
@@ -375,11 +387,11 @@ void InitializeHorovodOnce(const int* ranks, int nranks) {
     }
 #endif
 #if HAVE_GLOO
-	//...
+  //...
 #endif
     // Reset initialization flag
     horovod_global.initialization_done = false;
- 		// 启动后台线程
+    // 启动后台线程
     horovod_global.background_thread = std::thread(
         BackgroundThreadLoop, std::ref(horovod_global));
   }
@@ -409,10 +421,8 @@ void BackgroundThreadLoop(HorovodGlobalState& state) {
   parse_and_set_affinity(std::getenv(HOROVOD_THREAD_AFFINITY), local_size, local_rank);
 
 #if HAVE_GPU
-  // 设置 gpu_context 的 stream 数目等初始化动作
-  ... 
+  ... // 设置 gpu_context 的 stream 数目等初始化动作
 #endif
-	// ...
   // 下面是设置 parameter_manager 这里为了节省篇幅直接给出，设置的语句，
   // 原来这里会读取对应的环境变量的，去设置 parameter_manager。
   // 后面也会有篇幅介绍 parameter_manager，这里先不展开。
@@ -423,7 +433,7 @@ void BackgroundThreadLoop(HorovodGlobalState& state) {
       (int)state.parameter_manager.CacheEnabled() * state.cache_capacity);
   state.parameter_manager.SetHierarchicalAllgather(value, true);
   state.parameter_manager.SetAutoTuning(true);
-	... // 其他一些初始化设置
+  ... // 其他一些初始化设置
   // 设置op_manager，这里主要是注册不同的集合通信库的 ops
   //（ 如：NCCLAllreduce, MPI_GPUAllgather 等）
   op_manager.reset(CreateOperationManager(state));
@@ -501,7 +511,7 @@ Status EnqueueTensorAllreduce(std::shared_ptr<OpContext> context,
 **ComputeResponseList**  具体的流程是（可以对照上面流程图看）：
 
 -   从自己进程的 GlobalState 读取 tensor_queue 的信息，如果有新的元素，会通过图中 popMessagesFromQueue pop 出来，然后经过一系列处理缓存到 **message_queue_tmp** 中。
--   当 worker 到达了前端 all_reduce 这句的时候，会用 **message_queue_tmp** 整理成一个 message_list通过下图的 **SendReadyTensors** 函数往主节点( coordinator ) 发送一个请求表明我打算reduce，然后会把准备 reduce 的 tensor 信息通过 message_list 迭代地送过去，最后有一个 Done 的请求
+-   当 worker 到达了前端 all_reduce 这句的时候，会用 **message_queue_tmp** 整理成一个 message_list通过流程图中的 **SendReadyTensors** 函数往主节点( coordinator ) 发送一个请求表明我打算reduce，然后会把准备 reduce 的 tensor 信息通过 message_list 迭代地送过去，最后有一个 Done 的请求
 -    coordinator 会接收通过图中 **RecvReadyTensors** 这些 requests，然后保存在 ready_to_reduce 中，coordinator 会持续接收这些信息，直到获取的 Done 的数目等于 global_size。
 -   coordinator 会找到所有准备好 reduce 的 tensors，通过 **SendFinalTensors** 返回一个 response 给所有的 worker，如果信息有误会返回一个 error，发送完成也会发送一个 Done。
 -   worker 会通过 **RecvFinalTensors** 监听 response 的信息，整理出需要 reduce 的 tensor，当收到 Done，会尝试调用 performation 去进行 reduce 。
@@ -524,7 +534,7 @@ void MPIController::SendReadyTensors(RequestList& message_list) {
   if (ret_code != MPI_SUCCESS) {
     throw std::runtime_error("MPI_Gather failed, see MPI output for details.");
   }
-	// 再 gather 这个 message
+  // 再 gather 这个 message
   ret_code = MPI_Gatherv((void*)encoded_message.c_str(), encoded_message_length,
                          MPI_BYTE, nullptr, nullptr, nullptr, MPI_BYTE,
                          RANK_ZERO, mpi_ctx_.mpi_comm);
@@ -570,7 +580,7 @@ void PerformOperation(Response response, HorovodGlobalState& state) {
   if (response.response_type() != Response::JOIN) {
     horovod_global.tensor_queue.GetTensorEntriesFromResponse(response, entries,
                                                              state.joined);
-	... // 对数据预处理和 buffer 初始化
+  ... // 对数据预处理和 buffer 初始化
   Status status;
   // 执行 all_reduce 等操作
   try {
@@ -578,7 +588,7 @@ void PerformOperation(Response response, HorovodGlobalState& state) {
   } catch (const std::exception& ex) {
     status = Status::UnknownError(ex.what());
   }
-	... // 调用 callback 函数
+  ... // 调用 callback 函数
 }
 
 ```
@@ -597,7 +607,7 @@ void PerformOperation(Response response, HorovodGlobalState& state) {
 
     ```c++
     Status MPIAllreduce::Execute(std::vector<TensorTableEntry>& entries, const Response& response) {
-    	... // 一些变量声明
+      ... // 一些变量声明
       // 把 tensor copy 到 buffer 中
       if (entries.size() > 1) {
         timeline.ActivityStartAll(entries, MEMCPY_IN_FUSION_BUFFER);
@@ -608,7 +618,7 @@ void PerformOperation(Response response, HorovodGlobalState& state) {
         buffer_data = (void*) first_entry.output->data();
         buffer_len = (size_t) first_entry.output->size();
       }
-    	// Do allreduce
+      // Do allreduce
       const void* sendbuf = entries.size() > 1 || fused_input_data == buffer_data
                             ? MPI_IN_PLACE : fused_input_data;
       int op = MPI_Allreduce(sendbuf, buffer_data,
@@ -746,3 +756,14 @@ private:
 ## 总结
 
 horovod 的流程分析大概就是这样，没有特别复杂，代码的阅读体验也是比较好的，在主流程的关键函数都有比较清晰的注释。对于第三方开发者来说，horovod 本身已经用了很多提高性能的 tricks，可以 custom 优化的地方不多，一些可以动的参数，也已经提供了autotuning，直接使用就可以得到很好的性能。上面的分析也有很多是我自己阅读代码时候的一些思考可能不一定准确，如果有不准确或者模糊的地方，也希望大家可以多多斧正。
+
+## Reference 
+
+1.  [Horovod]((https://github.com/horovod/horovod))
+2.  [MPI，OpenMPI 与深度学习](https://zhuanlan.zhihu.com/p/158584571)   
+3.  [腾讯机智团队分享--AllReduce算法的前世今生](https://zhuanlan.zhihu.com/p/79030485)
+4.  [WRITING DISTRIBUTED APPLICATIONS WITH PYTORCH](https://pytorch.org/tutorials/intermediate/dist_tuto.html)
+5.  [OpenMPI](https://www.open-mpi.org/)
+6.  [Bringing HPC Techniques to Deep Learning](https://andrew.gibiansky.com/blog/machine-learning/baidu-allreduce/)
+7.  [Pytorch Document](https://pytorch.org/docs/stable/index.html)
+
