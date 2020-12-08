@@ -625,9 +625,7 @@ void PerformOperation(Response response, HorovodGlobalState& state) {
 
 -   如果还没初始化buffer，调用 horovod_global.fusion_buffer.InitializeBuffer 初始化
 
--   然后  status = op_manager->ExecuteOperation(entries, response); 
-
--   会调用不同的 op->Execute(entries, response);  
+-   然后  status = op_manager->ExecuteOperation(entries, response) 会调用不同的 op->Execute(entries, response) 执行reduce 运算。 
 
     下面以 **MPIAllreduce::Execute** 为例：
 
