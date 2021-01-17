@@ -9,15 +9,13 @@
 
 - [Run源码分析](#Run源码分析)
 
-  -  [scheduleOne: Part1](#scheduleOne: Part1)
+  -  [scheduleOne:Part1](#scheduleOnePart1) 
+    	- [太长不看版](#太长不看版)
+    	- [具体代码细节](#具体代码细节)
+  - [scheduleOne:Part2](#scheduleOnePart2)
     - [太长不看版](#太长不看版)
     - [具体代码细节](#具体代码细节)
-
-  - [scheduleOne: Part2](#scheduleOne: Part2)
-    - [太长不看版](#太长不看版)
-    - [具体代码细节](#具体代码细节)
-
-  - [scheduleOne: Part3](#scheduleOne: Part3)
+  - [scheduleOne:Part3](#scheduleOnePart3)
     - [具体代码细节](#具体代码细节)
 
 - [总结](#总结)
@@ -412,7 +410,7 @@ func (sched *Scheduler) Run(ctx context.Context) {
 
 SchedulingQueue.Run() 会起两个 goroutine ，flushBackoffQCompleted 主要负责把所有 backoff 计时完毕（duration 会因为失败变长）的 pod 往 activeQ刷。flushUnschedulableQLeftover 把所有在 unschedulableQ 的 pod  计时unschedulableQTimeInterval 完毕后送去 activeQ。
 
-### scheduleOne: Part1
+### scheduleOnePart1
 
 scheduleOne 是调度的主逻辑，下面会把 scheduleOne 的逻辑分为3部分，第一部分是调度部分，第二部分是对调度结果进行处理部分（抢占），第三部分是绑定等部分。
 
@@ -451,206 +449,205 @@ func (sched *Scheduler) scheduleOne(ctx context.Context) {
 
 ScheudleOne 第一部分的逻辑如上：
 
- 1.    首先 sched.NextPod() 会调用 scheduler 的 Pop 接口，后面会直接 PriorityQueue.activeQ.Pop()
+  1.    首先 sched.NextPod() 会调用 scheduler 的 Pop 接口，后面会直接 PriorityQueue.activeQ.Pop()
+  2.    查看 profile(plugin) 是否负责这个 pod，Profile, err := sched.profileForPod(pod) 【之前版本是 frameworkForPod】 会查看 pod 的 schedulername
+  3.    skipPodSchedule 有两种情况 skip，(1) pod 正在被删除，(2) pod 被 assumed
+  4.    scheduleResult, err := sched.Algorithm.Schedule这里会根据提供的算法调用 genericScheduler.Schedule 完成调度，这里需要展开一下。
 
- 2.    查看 profile(plugin) 是否负责这个 pod，Profile, err := sched.profileForPod(pod) 【之前版本是 frameworkForPod】 会查看 pod 的 schedulername
+```go
+// pkg/scheduler/core/generic_scheduler.go
+func (g *genericScheduler) Schedule(ctx context.Context, prof *profile.Profile, state *framework.CycleState, pod *v1.Pod) (result ScheduleResult, err error) {
+   ... // some preprocess
+   // 1. 生成这个时刻的 snapshot
+   if err := g.snapshot(); err != nil {
+      return result, err
+   }
+   ...
+   // 2. 对 node 进行预选，过滤出合适的pod
+   feasibleNodes, filteredNodesStatuses, err := g.findNodesThatFitPod(ctx, prof, state, pod)
+   if err != nil {...}
+   if len(feasibleNodes) == 0 {
+       return result, &FitError{...)
+   }
+   ... // some metrics
+   // 如果只有一个 node 合适就不会进入优选环节，直接返回
+   if len(feasibleNodes) == 1 {
+	 		... // some metrics
+      return ScheduleResult{
+         SuggestedHost:  feasibleNodes[0].Name,
+         EvaluatedNodes: 1 + len(filteredNodesStatuses),
+         FeasibleNodes:  1,
+      }, nil
+   }
+   // 3. 对 node 进行优选
+   priorityList, err := g.prioritizeNodes(ctx, prof, state, pod, feasibleNodes)
+   if err != nil {
+      return result, err
+   }
+	 ... // some metrics
+   host, err := g.selectHost(priorityList)
+   trace.Step("Prioritizing done")
 
- 3.    skipPodSchedule 有两种情况 skip，(1) pod 正在被删除，(2) pod 被 assumed
+   return ScheduleResult{
+      SuggestedHost:  host,
+      EvaluatedNodes: len(feasibleNodes) + len(filteredNodesStatuses),
+      FeasibleNodes:  len(feasibleNodes),
+   }, err
+}
+```
 
- 4.    scheduleResult, err := sched.Algorithm.Schedule这里会根据提供的算法调用 genericScheduler.Schedule 完成调度，这里需要展开一下：
 
-    pkg/scheduler/core/generic_scheduler.go
 
-    ```go
-    func (g *genericScheduler) Schedule(ctx context.Context, prof *profile.Profile, state *framework.CycleState, pod *v1.Pod) (result ScheduleResult, err error) {
-       ... // some preprocess
-       // 1. 生成这个时刻的 snapshot
-       if err := g.snapshot(); err != nil {
-          return result, err
-       }
-       ...
-       // 2. 对 node 进行预选，过滤出合适的pod
-       feasibleNodes, filteredNodesStatuses, err := g.findNodesThatFitPod(ctx, prof, state, pod)
-       if err != nil {...}
-       if len(feasibleNodes) == 0 {
-           return result, &FitError{...)
-       }
-       ... // some metrics
-       // 如果只有一个 node 合适就不会进入优选环节，直接返回
-       if len(feasibleNodes) == 1 {
-    	 		... // some metrics
-          return ScheduleResult{
-             SuggestedHost:  feasibleNodes[0].Name,
-             EvaluatedNodes: 1 + len(filteredNodesStatuses),
-             FeasibleNodes:  1,
-          }, nil
-       }
-       // 3. 对 node 进行优选
-       priorityList, err := g.prioritizeNodes(ctx, prof, state, pod, feasibleNodes)
-       if err != nil {
-          return result, err
-       }
-    	 ... // some metrics
-       host, err := g.selectHost(priorityList)
-       trace.Step("Prioritizing done")
-    
-       return ScheduleResult{
-          SuggestedHost:  host,
-          EvaluatedNodes: len(feasibleNodes) + len(filteredNodesStatuses),
-          FeasibleNodes:  len(feasibleNodes),
-       }, err
-    }
-    ```
+##### FindNodesThatFitPod
 
-    ##### FindNodesThatFitPod
+1.  生成一个这个时刻的 snapshot，主要是这个时刻的 nodeInfo map 生成一份快照
 
-    1.  生成一个这个时刻的 snapshot，主要是这个时刻的 nodeInfo map 生成一份快照
+2.  findNodesThatFitPod 找什么 node 适合这个 pod，针对 node 的信息进行判断，其代码如下。
 
-    2.  findNodesThatFitPod 找什么 node 适合这个 pod，针对 node 的信息进行判断，其代码如下：
+   ```go
+//pkg/scheduler/core/generic_scheduler.go
+   func (g *genericScheduler) findNodesThatFitPod(ctx context.Context, prof *profile.Profile, state *framework.CycleState, pod *v1.Pod) ([]*v1.Node, framework.NodeToStatusMap, error) {
+         filteredNodesStatuses := make(framework.NodeToStatusMap)
+   // Run "prefilter" plugins.
+          // 1. 运行预过滤 plugin 逻辑
+          s := prof.RunPreFilterPlugins(ctx, state, pod)
+          ... //错误处理 
+          // 2. 对 nodes 进行过滤，返回 nodes 列表
+          feasibleNodes, err := g.findNodesThatPassFilters(ctx, prof, state, pod, filteredNodesStatuses)
+          if err != nil {
+             return nil, nil, err
+          }
+          // 3. 运行 extender 过滤逻辑
+          feasibleNodes, err = g.findNodesThatPassExtenders(pod, feasibleNodes, filteredNodesStatuses)
+          if err != nil {
+             return nil, nil, err
+          }
+          return feasibleNodes, filteredNodesStatuses, nil
+   }
+   ```
+   
 
-       pkg/scheduler/core/generic_scheduler.go
-
+   
+1.  prof.RunPreFilterPlugins(ctx, state, pod) 先进行预过滤，主要对 pod 进行。
+   
+   2.  g.findNodesThatPassFilters(ctx, prof, state, pod, filteredNodesStatuses) 这部分会问这个 pod 调度到该 node 合适吗，主要会跟 node 中的 pod 进行亲和性检查等过滤性操作，这里展开一下：
+       
        ```go
-       func (g *genericScheduler) findNodesThatFitPod(ctx context.Context, prof *profile.Profile, state *framework.CycleState, pod *v1.Pod) ([]*v1.Node, framework.NodeToStatusMap, error) {
-             filteredNodesStatuses := make(framework.NodeToStatusMap)
-       // Run "prefilter" plugins.
-              // 1. 运行预过滤 plugin 逻辑
-              s := prof.RunPreFilterPlugins(ctx, state, pod)
-              ... //错误处理 
-              // 2. 对 nodes 进行过滤，返回 nodes 列表
-              feasibleNodes, err := g.findNodesThatPassFilters(ctx, prof, state, pod, filteredNodesStatuses)
-              if err != nil {
-                 return nil, nil, err
-              }
-              // 3. 运行 extender 过滤逻辑
-              feasibleNodes, err = g.findNodesThatPassExtenders(pod, feasibleNodes, filteredNodesStatuses)
-              if err != nil {
-                 return nil, nil, err
-              }
-              return feasibleNodes, filteredNodesStatuses, nil
+       func (g *genericScheduler) findNodesThatPassFilters(ctx context.Context, prof *profile.Profile, state *framework.CycleState, pod *v1.Pod, statuses framework.NodeToStatusMap) ([]*v1.Node, error) {
+       	allNodes, err := g.nodeInfoSnapshot.NodeInfos().List()
+           	if err != nil {
+           		return nil, err
+               }
+              // 1. 选择总共多少个 nodes 尝试去调度
+       numNodesToFind := g.numFeasibleNodesToFind(int32(len(allNodes)))
+          
+          	// Create feasible list with enough space to avoid growing it
+          	// and allow assigning.
+          	feasibleNodes := make([]*v1.Node, numNodesToFind)
+       
+          	if !prof.HasFilterPlugins() {
+       	... //如果没有 filterPlugins, 直接返回所有的 nodes
+          	}
+       
+          	errCh := parallelize.NewErrorChannel()
+          	var statusesLock sync.Mutex
+          	var feasibleNodesLen int32
+          	ctx, cancel := context.WithCancel(ctx)
+           // 2. 启动16个 goroutine 并行过滤，
+          	checkNode := func(i int) {
+          		nodeInfo := allNodes[(g.nextStartNodeIndex+i)%len(allNodes)]
+          		fits, status, err := PodPassesFiltersOnNode(ctx, prof.PreemptHandle(), state, pod, nodeInfo)
+          		if err != nil {...}
+          		if fits {
+          			length := atomic.AddInt32(&feasibleNodesLen, 1)
+          			if length > numNodesToFind {
+          				cancel()
+          				atomic.AddInt32(&feasibleNodesLen, -1)
+          			} else {
+          				feasibleNodes[length-1] = nodeInfo.Node()
+          			}
+          		} else {
+          			statusesLock.Lock()
+          			if !status.IsSuccess() {
+          				statuses[nodeInfo.Node().Name] = status
+          			}
+          			statusesLock.Unlock()
+          		}
+          	}
+          
+          	beginCheckNode := time.Now()
+          	statusCode := framework.Success
+          	defer func() {
+          	... // some matrics
+              // 起 16 个goroutine 跑 checkNode
+          	parallelize.Until(ctx, len(allNodes), checkNode)
+          	processedNodes := int(feasibleNodesLen) + len(statuses)
+          	g.nextStartNodeIndex = (g.nextStartNodeIndex + processedNodes) % len(allNodes)
+          
+          	feasibleNodes = feasibleNodes[:feasibleNodesLen]
+          	if err := errCh.ReceiveError(); err != nil {
+          		statusCode = framework.Error
+          		return nil, err
+          	}
+          	return feasibleNodes, nil
        }
        ```
+       
+       - 这里会定义 numNodesToFind := g.numFeasibleNodesToFind(int32(len(allNodes))) 确定遍历 node 的数目，如果集群太大，遍历所有的 node 是比较耗时的，默认是如果 nodes 数目小于100，会遍历所有 node，如果太多会取百分比。 
+       - 然后  会通过 parallelize 提供的并发接口调用 checkNode，一般并发数量为 16。checkNode 会调用 PodPassesFiltersOnNode ，会通过 RunFilterPlugins 运行各个 filterplugins 主要是看一下pod 跟在 node 里面的pod 有没有不兼容的关系，查一下优先级是不是equal 或者有比上面的pod 大，如果可以抢占？
+       - checkNode 会返回不同node 的适不适合的信息，如果适合，信息放在一个list 中 feasibleNodes[length-1] = nodeInfo.Node()；如果不适合，在 statuses[nodeInfo.Node().Name] = status 登记错误信息
+       - findNodesThatPassExtenders 会遍历不同 extender，针对不同的资源，Filter(pod, feasibleNodes) 主要也是用户写的custom filter，也是返回 feasibleNodes（ []v1.Node）。
+       
+3.  前面 findNodesThatFitPod 返回了合适 []v1.Node，g.prioritizeNodes 会根据一些优先级算法计算不同node的得分给出这些node 的排序。
+   
+       ```go
+       func (g *genericScheduler) prioritizeNodes(
+       	ctx context.Context,
+       	prof *profile.Profile,
+       	state *framework.CycleState,
+       	pod *v1.Pod,
+       	nodes []*v1.Node,
+       ) (framework.NodeScoreList, error) {
+           ...
+       	// Run PreScore plugins.
+       	preScoreStatus := prof.RunPreScorePlugins(ctx, state, pod, nodes)
+       	if !preScoreStatus.IsSuccess() {
+       		return nil, preScoreStatus.AsError()
+       	}
+       
+       	// Run the Score plugins.
+       	scoresMap, scoreStatus := prof.RunScorePlugins(ctx, state, pod, nodes)
+       	if !scoreStatus.IsSuccess() {
+       		return nil, scoreStatus.AsError()
+       	}
+       	...
+       	// Summarize all scores. 汇总所有 node 的分数
+       	result := make(framework.NodeScoreList, 0, len(nodes))
+       
+       	for i := range nodes {
+       		result = append(result, framework.NodeScore{Name: nodes[i].Name, Score: 0})
+       		for j := range scoresMap {
+       			result[i].Score += scoresMap[j][i].Score
+       		}
+       	}
+       	// 不同的extender 使用不同的goroutine 调用Prioritize函数
+       	if len(g.extenders) != 0 && nodes != nil {
+       		...
+       	}
+       	...
+       	return result, nil
+       }
+       ```
+       
+       -  分别调用不同 plugin 的 RunPreScorePlugins 前置评分
+       - RunScorePlugins 获取每个 plugin 对每个预选节点的分数，这里主要看一下，pod 调度上去会不会跟上面的 pod 有亲和性的关系(affinity) 等。如果说前面 filter 主要是针对 node 进行评价，这里主要是针对 node 里面的 pod 进行评价。
+       - 上面默认会起 16 goroutine 来对每个 plugin 进行计分，返回的 scoreMap key 是 plugin, 元素是一个 nodescore list，表示对每个节点的评分。
+       - 然后把所有的分数汇总在 result 中
+       - 如果有 extender 会分别起不同的 goroutine 去调用 extender.Prioritize，结果也是汇总到 result 中。
+       
+   4.  然后 host, err := g.selectHost(priorityList) 会根据前面 findNodesThatFitPod 的排序结果选择一个合适的pod。
 
-       1.  prof.RunPreFilterPlugins(ctx, state, pod) 先进行预过滤，主要对 pod 进行。
-
-       2.  g.findNodesThatPassFilters(ctx, prof, state, pod, filteredNodesStatuses) 这部分会问这个 pod 调度到该 node 合适吗，主要会跟 node 中的 pod 进行亲和性检查等过滤性操作，这里展开一下：
-           
-           ```go
-           func (g *genericScheduler) findNodesThatPassFilters(ctx context.Context, prof *profile.Profile, state *framework.CycleState, pod *v1.Pod, statuses framework.NodeToStatusMap) ([]*v1.Node, error) {
-           	allNodes, err := g.nodeInfoSnapshot.NodeInfos().List()
-               	if err != nil {
-               		return nil, err
-                   }
-                  // 1. 选择总共多少个 nodes 尝试去调度
-           numNodesToFind := g.numFeasibleNodesToFind(int32(len(allNodes)))
-              
-              	// Create feasible list with enough space to avoid growing it
-              	// and allow assigning.
-              	feasibleNodes := make([]*v1.Node, numNodesToFind)
-           
-              	if !prof.HasFilterPlugins() {
-           	... //如果没有 filterPlugins, 直接返回所有的 nodes
-              	}
-           
-              	errCh := parallelize.NewErrorChannel()
-              	var statusesLock sync.Mutex
-              	var feasibleNodesLen int32
-              	ctx, cancel := context.WithCancel(ctx)
-               // 2. 启动16个 goroutine 并行过滤，
-              	checkNode := func(i int) {
-              		nodeInfo := allNodes[(g.nextStartNodeIndex+i)%len(allNodes)]
-              		fits, status, err := PodPassesFiltersOnNode(ctx, prof.PreemptHandle(), state, pod, nodeInfo)
-              		if err != nil {...}
-              		if fits {
-              			length := atomic.AddInt32(&feasibleNodesLen, 1)
-              			if length > numNodesToFind {
-              				cancel()
-              				atomic.AddInt32(&feasibleNodesLen, -1)
-              			} else {
-              				feasibleNodes[length-1] = nodeInfo.Node()
-              			}
-              		} else {
-              			statusesLock.Lock()
-              			if !status.IsSuccess() {
-              				statuses[nodeInfo.Node().Name] = status
-              			}
-              			statusesLock.Unlock()
-              		}
-              	}
-              
-              	beginCheckNode := time.Now()
-              	statusCode := framework.Success
-              	defer func() {
-              	... // some matrics
-                  // 起 16 个goroutine 跑 checkNode
-              	parallelize.Until(ctx, len(allNodes), checkNode)
-              	processedNodes := int(feasibleNodesLen) + len(statuses)
-              	g.nextStartNodeIndex = (g.nextStartNodeIndex + processedNodes) % len(allNodes)
-              
-              	feasibleNodes = feasibleNodes[:feasibleNodesLen]
-              	if err := errCh.ReceiveError(); err != nil {
-              		statusCode = framework.Error
-              		return nil, err
-              	}
-              	return feasibleNodes, nil
-           }
-           ```
-           
-           - 这里会定义 numNodesToFind := g.numFeasibleNodesToFind(int32(len(allNodes))) 确定遍历 node 的数目，如果集群太大，遍历所有的 node 是比较耗时的，默认是如果 nodes 数目小于100，会遍历所有 node，如果太多会取百分比。 
-           - 然后  会通过 parallelize 提供的并发接口调用 checkNode，一般并发数量为 16。checkNode 会调用 PodPassesFiltersOnNode ，会通过 RunFilterPlugins 运行各个 filterplugins 主要是看一下pod 跟在 node 里面的pod 有没有不兼容的关系，查一下优先级是不是equal 或者有比上面的pod 大，如果可以抢占？
-           - checkNode 会返回不同node 的适不适合的信息，如果适合，信息放在一个list 中 feasibleNodes[length-1] = nodeInfo.Node()；如果不适合，在 statuses[nodeInfo.Node().Name] = status 登记错误信息
-           - findNodesThatPassExtenders 会遍历不同 extender，针对不同的资源，Filter(pod, feasibleNodes) 主要也是用户写的custom filter，也是返回 feasibleNodes（ []v1.Node）。
-           
-       3.  前面 findNodesThatFitPod 返回了合适 []v1.Node，g.prioritizeNodes 会根据一些优先级算法计算不同node的得分给出这些node 的排序。
-
-           ```go
-           func (g *genericScheduler) prioritizeNodes(
-           	ctx context.Context,
-           	prof *profile.Profile,
-           	state *framework.CycleState,
-           	pod *v1.Pod,
-           	nodes []*v1.Node,
-           ) (framework.NodeScoreList, error) {
-               ...
-           	// Run PreScore plugins.
-           	preScoreStatus := prof.RunPreScorePlugins(ctx, state, pod, nodes)
-           	if !preScoreStatus.IsSuccess() {
-           		return nil, preScoreStatus.AsError()
-           	}
-           
-           	// Run the Score plugins.
-           	scoresMap, scoreStatus := prof.RunScorePlugins(ctx, state, pod, nodes)
-           	if !scoreStatus.IsSuccess() {
-           		return nil, scoreStatus.AsError()
-           	}
-           	...
-           	// Summarize all scores. 汇总所有 node 的分数
-           	result := make(framework.NodeScoreList, 0, len(nodes))
-           
-           	for i := range nodes {
-           		result = append(result, framework.NodeScore{Name: nodes[i].Name, Score: 0})
-           		for j := range scoresMap {
-           			result[i].Score += scoresMap[j][i].Score
-           		}
-           	}
-           	// 不同的extender 使用不同的goroutine 调用Prioritize函数
-           	if len(g.extenders) != 0 && nodes != nil {
-           		...
-           	}
-           	...
-           	return result, nil
-           }
-           ```
-           
-           -  分别调用不同 plugin 的 RunPreScorePlugins 前置评分
-           - RunScorePlugins 获取每个 plugin 对每个预选节点的分数，这里主要看一下，pod 调度上去会不会跟上面的 pod 有亲和性的关系(affinity) 等。如果说前面 filter 主要是针对 node 进行评价，这里主要是针对 node 里面的 pod 进行评价。
-           - 上面默认会起 16 goroutine 来对每个 plugin 进行计分，返回的 scoreMap key 是 plugin, 元素是一个 nodescore list，表示对每个节点的评分。
-           - 然后把所有的分数汇总在 result 中
-           - 如果有 extender 会分别起不同的 goroutine 去调用 extender.Prioritize，结果也是汇总到 result 中。
-           
-       4.  然后 host, err := g.selectHost(priorityList) 会根据前面 findNodesThatFitPod 的排序结果选择一个合适的pod。
-
-### scheduleOne: Part2
+### scheduleOnePart2
 
 继续 scheduleOne 的逻辑，这部分是指调度失败的错误处理。主要是抢占和驱逐，这部分跟上一部分的逻辑比较类似，不过输入的 nodes，会有一些过滤。
 
@@ -837,7 +834,7 @@ pkg/scheduler/scheduler.go: scheduleOne
 
     -   PrepareCandidate 会驱逐 victims pod，如果这些 pod 在waitting，不给调度，清楚他们的nominatedNodeName，如果有比较低优先级的pods 被提名到这个 node 会不合适。
 
-### scheduleOne: Part3
+### scheduleOnePart3
 
 ![binding](scheduler_public/binding.png)
 
@@ -878,6 +875,7 @@ pkg/scheduler/scheduler.go: scheduleOne
 
 -   如果前面 part1 schedule 的 sched.Algorithm.Schedule 调度算法调度成功，scheduleResult 返回一个建议调度的node，然后调用 sched.assume，这里主要是在 cache 中记录这个 pod 为已经调度了，这样下次调度的时候就不会重新调度一次这个 pod。
 -   然后会调用，RunReservePluginsReserve，RunPermitPlugins，这些 plugins 设置的位点，我们假设没有plugins 设置了先跳过。
+    
     -   reserve 会执行像 AssumePodVolumes 等，除了 pod assume 之外需要在 cache 保留的操作，unreserve 类似。
 -   RunPermitPlugins 会成为bind 的准入，就是前面reserve 之后相关的资源就不会被使用了，不过还有一些条件没有满足，所以不可以 bind，就是为了占着资源，类似 gang-scheduling 的时候会用到。
 
