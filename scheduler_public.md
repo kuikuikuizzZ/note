@@ -1,4 +1,28 @@
-[toc]
+[kube-scheduler](#kube-scheduler)
+
+- [工作原理](#工作原理)
+
+  - [调度器架构 ](#调度器架构 )
+  - [工作流程](#工作流程)
+
+- [Setup源码分析](#Setup源码分析)
+
+- [Run源码分析](#Run源码分析)
+
+  -  [scheduleOne: Part1](#scheduleOne: Part1)
+    - [太长不看版](#太长不看版)
+    - [具体代码细节](#具体代码细节)
+
+  - [scheduleOne: Part2](#scheduleOne: Part2)
+    - [太长不看版](#太长不看版)
+    - [具体代码细节](#具体代码细节)
+
+  - [scheduleOne: Part3](#scheduleOne: Part3)
+    - [具体代码细节](#具体代码细节)
+
+- [总结](#总结)
+
+- [参考](#参考)
 
 # kube-scheduler
 
@@ -127,17 +151,21 @@ func Setup(ctx context.Context, opts *options.Options, outOfTreeRegistryOptions 
 }
 ```
 
-Setup 函数主要干了几件事。  
+Setup 函数主要干了几件事。 
 
--   Setup 函数中，opt.Config() 主要做了下面几件事：
-    
-    1.  createClients 启动 clientset
-    2.  events.NewEventBroadcasterAdapter(eventClient) 启动  EventBroadcaster
-    3.  c.InformerFactory = informers.NewSharedInformerFactory(client, 0) 启动 informer
-    
+### opt.config 
+
+Setup 函数中，opt.Config() 主要做了下面几件事：
+
+1.  createClients 启动 clientset
+2.  events.NewEventBroadcasterAdapter(eventClient) 启动  EventBroadcaster
+3.  c.InformerFactory = informers.NewSharedInformerFactory(client, 0) 启动 informer
+
 上面这几步基本所有的 kubernetes 的组件基本都是有的，保证组件跟 api-server 的通信。
-    
-- 然后 scheduler.New 启动 scheduler 实例：
+
+### scheduler.New 
+
+然后 scheduler.New 启动 scheduler 实例：
 
 pkg/scheduler/scheduler.go
 
@@ -401,6 +429,8 @@ scheduleOne 是调度的主逻辑，下面会把 scheduleOne 的逻辑分为3部
 
 pkg/scheduler/scheduler.go 
 
+
+
 ```go
 // scheduleOne does the entire scheduling workflow for a single pod.  It is serialized on the scheduling algorithm's host fitting.
 func (sched *Scheduler) scheduleOne(ctx context.Context) {
@@ -471,20 +501,22 @@ ScheudleOne 第一部分的逻辑如上：
        }, err
     }
     ```
-    
+
+    ##### FindNodesThatFitPod
+
     1.  生成一个这个时刻的 snapshot，主要是这个时刻的 nodeInfo map 生成一份快照
-    
+
     2.  findNodesThatFitPod 找什么 node 适合这个 pod，针对 node 的信息进行判断，其代码如下：
-    
+
        pkg/scheduler/core/generic_scheduler.go
-    
-   ```go
+
+       ```go
        func (g *genericScheduler) findNodesThatFitPod(ctx context.Context, prof *profile.Profile, state *framework.CycleState, pod *v1.Pod) ([]*v1.Node, framework.NodeToStatusMap, error) {
-         filteredNodesStatuses := make(framework.NodeToStatusMap)
+             filteredNodesStatuses := make(framework.NodeToStatusMap)
        // Run "prefilter" plugins.
-          // 1. 运行预过滤 plugin 逻辑
+              // 1. 运行预过滤 plugin 逻辑
               s := prof.RunPreFilterPlugins(ctx, state, pod)
-          ... //错误处理 
+              ... //错误处理 
               // 2. 对 nodes 进行过滤，返回 nodes 列表
               feasibleNodes, err := g.findNodesThatPassFilters(ctx, prof, state, pod, filteredNodesStatuses)
               if err != nil {
@@ -495,16 +527,16 @@ ScheudleOne 第一部分的逻辑如上：
               if err != nil {
                  return nil, nil, err
               }
-           return feasibleNodes, filteredNodesStatuses, nil
+              return feasibleNodes, filteredNodesStatuses, nil
        }
-    ```
-       
+       ```
+
        1.  prof.RunPreFilterPlugins(ctx, state, pod) 先进行预过滤，主要对 pod 进行。
-       
+
        2.  g.findNodesThatPassFilters(ctx, prof, state, pod, filteredNodesStatuses) 这部分会问这个 pod 调度到该 node 合适吗，主要会跟 node 中的 pod 进行亲和性检查等过滤性操作，这里展开一下：
-       
+           
            ```go
-       func (g *genericScheduler) findNodesThatPassFilters(ctx context.Context, prof *profile.Profile, state *framework.CycleState, pod *v1.Pod, statuses framework.NodeToStatusMap) ([]*v1.Node, error) {
+           func (g *genericScheduler) findNodesThatPassFilters(ctx context.Context, prof *profile.Profile, state *framework.CycleState, pod *v1.Pod, statuses framework.NodeToStatusMap) ([]*v1.Node, error) {
            	allNodes, err := g.nodeInfoSnapshot.NodeInfos().List()
                	if err != nil {
                		return nil, err
@@ -570,14 +602,14 @@ ScheudleOne 第一部分的逻辑如上：
            - findNodesThatPassExtenders 会遍历不同 extender，针对不同的资源，Filter(pod, feasibleNodes) 主要也是用户写的custom filter，也是返回 feasibleNodes（ []v1.Node）。
            
        3.  前面 findNodesThatFitPod 返回了合适 []v1.Node，g.prioritizeNodes 会根据一些优先级算法计算不同node的得分给出这些node 的排序。
-    
+
            ```go
            func (g *genericScheduler) prioritizeNodes(
            	ctx context.Context,
            	prof *profile.Profile,
            	state *framework.CycleState,
            	pod *v1.Pod,
-       	nodes []*v1.Node,
+           	nodes []*v1.Node,
            ) (framework.NodeScoreList, error) {
                ...
            	// Run PreScore plugins.
