@@ -4,9 +4,7 @@
 
   - [调度器架构 ](#调度器架构 )
   - [工作流程](#工作流程)
-
 - [Setup源码分析](#Setup源码分析)
-
 - [Run源码分析](#Run源码分析)
 
   -  [scheduleOne:Part1](#scheduleOnePart1) 
@@ -17,10 +15,26 @@
     - [具体代码细节](#具体代码细节)
   - [scheduleOne:Part3](#scheduleOnePart3)
     - [具体代码细节](#具体代码细节)
-
 - [总结](#总结)
-
 - [参考](#参考)
+
+[kube-scheduler](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#kube-scheduler)
+
+- [工作原理](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#工作原理)
+  - [调度器架构](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#调度器架构)
+  - [工作流程](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#工作流程)
+- [Setup源码分析](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#Setup源码分析)
+- [Run源码分析](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#Run源码分析)
+  - scheduleOne:Part1
+    - [太长不看版](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#太长不看版)
+    - [具体代码细节](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#具体代码细节)
+  - scheduleOne:Part2
+    - [太长不看版](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#太长不看版)
+    - [具体代码细节](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#具体代码细节)
+  - scheduleOne:Part3
+    - [具体代码细节](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#具体代码细节)
+- [总结](https://github.com/kuikuikuizzZ/note/blob/master/scheduler_public.md#总结)
+- 参考
 
 # kube-scheduler
 
