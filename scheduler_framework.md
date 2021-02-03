@@ -2,19 +2,6 @@
 
 ## Scheduler Framework 
 
-- [原理](#原理)
-  - [Preparing](#Preparing)
-  - [Scheduling ](#Scheduling )
-  - [Binding](#Binding)
-- [实现](#实现)
-  - [Framwork](#Framwork)
-  - [Plugin](#Plugin)
-    - [nodeAffinity](#nodeAffinity)
-  - [Registry](#Registry)
-  - [Scheduler-plugins](#Scheduler-plugins)
-- [总结](#总结)
-- [Reference](#Reference)
-
 ​		前面我们聊了 kubernetes 的默认调度器 default scheduler，其简单的调度逻辑，在 kubernetes 多个版本的迭代中一直保持稳定性能。不过随着 Kubernetes 部署的任务类型越来越多，原生的调度器已经不能应对多样的调度需求：比如机器学习、深度学习训练任务中对于多个 pod 协同调度的需求；大数据作业有原来自己的生态，需要在调度层面做相应的适配和迁移；原来高性能计算作业中，对一些高性能组件像 GPU、infiniteBand 网络、存储卷的动态资源的绑定需求等。另外，越来越多的 feature 也一直在被引入到 scheduler 的主干中，也使得 kube-scheduler 的维护变得越来越困难。 
 
 ​		所以，kubernetes 社区在 v1.15 的版本中开始逐步引入 scheduler framework 为 kube-scheduler 带来更多的可扩展性，把之前很多的调度逻辑函数都通过 plugin 的形式重新改造，同时引入了更多位点方便定制 scheduler。本文会先讨论 scheduler 的原理，然后通过分析不同的 plugin 的代码实现来更加具体的了解 scheduler framework。
