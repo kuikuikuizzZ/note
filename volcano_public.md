@@ -1,10 +1,32 @@
 #  Volcano（scheduler 03）
 
-	[toc]
+- [介绍](#介绍)
+- [流程分析](#流程分析)
+  - [概述](#概述)
+  - [创建job](#创建job)
+    - [主流程](#主流程)
+    - [volcanojobVSbatch/v1Job](#volcanojobVSbatch/v1Job)
+    - [volcanojobVSCRDjob](#volcanojobVSCRDjob		)
+  - [同步信息](#同步信息)
+    - [主流程](#主流程)
+    - [scheduler初始化](#scheduler初始化)
+    - [cacheInfo ](#cacheInfo )
+  - [调度](#调度)
+    - [概述](#概述)
+    - [OpenSession](#OpenSession)
+    - [enqueue](#enqueue)
+    - [allocate](#allocate)
+    - [调度回顾](#调度回顾)
+  - [Plugin机制](#Plugin机制)
+- [参考](#参考)
 
-除了前面聊到的通过 scheduler framework 对 kubernetes 的调度特性进行扩展之外，还可以通过多调度器的方式进行扩展，因为我自己的背景关系，会比较关注跟机器学习工作负载相关的的调度器，现在社区比较成熟的方案有 kube-batch，和由其延伸出来的 volcano，主要是补足了 kubernetes 批调度的短板，其社区也比较活跃。
+## 介绍
+
+​		除了前面聊到的通过 scheduler framework 对 kubernetes 的调度特性进行扩展之外，还可以通过多调度器的方式进行扩展，因为我自己的背景关系，会比较关注跟机器学习工作负载相关的的调度器，现在社区比较成熟的方案有 kube-batch，和由其延伸出来的 volcano，主要是补足了 kubernetes 批调度的短板，其社区也比较活跃。
 
 ​		因为 volcano 是植根于 kube-batch，不过添加了更加多的 feature（如提供了一个 controller Manager 用于管理 volcano 自己可扩展的 job CRD 和 queue，podgroup 等资源，还有一系列命令行工具），而 kube-batch 主要以批调度器为主，这篇文章会着重于从源码的角度分析 volcano，中间如果有需要会穿插跟 kube-batch 的异同。文章组织上，我自己想从创建一个 volcano 的 job 开始，逐步对其调度流程进行分析。为了讲述和复现的方便，我们这里源码是根据 volcano v1.1.0 的版本进行分析的。
+
+## 流程分析
 
 ### 概述
 
@@ -18,7 +40,9 @@
 -   向 api-server 申请 pod 和 node 的绑定
 -   kubelet 看到有 pod 进行绑定，启动容器。 
 
-### 创建 job
+### 创建job
+
+#### 主流程
 
  我们以 examples 中的 tensorflow examples 进行分析：
 
@@ -111,9 +135,7 @@ spec:
 
 现在集群中有这个 job 对应的 pod，和 podgroup 了。
 
-#### 延伸
-
-#### volcanojob VS batch/v1Job
+#### volcanojobVSbatch/v1Job
 
 上面聊到的 volcano job（pkg/apis/batch/v1alpha1/job.go） 对比 kubernetes 下 batch/v1的 job， 主要有以下区别：
 
@@ -171,7 +193,7 @@ type TaskSpec struct {
 
 ```
 
-#### volcanojob VS CRD job		
+#### volcanojobVSCRDjob		
 
 另外，从上面流程分析可以看到，volcano job controller 同步之后主要是创建了 pod 和 podgroup，然后 volcano 的 scheduler 也不会单独去 watch volcanojob，所以后续调度流程主要就是通过 pod，podgroup 的信息来实现的，job controller 只会同步一下 status。这样也给开发者带来了灵活性，其他的 CRD jobs 也可以通过这样的机制，让自己的 CRD jobs 使用 volcano 调度起来，具体可能还需要 podgroup controller 的协助，实例如下图。具体可以参考一下，[tf-operator](https://github.com/kubeflow/tf-operator) 的实现这里就不展开了。      
 
@@ -179,7 +201,9 @@ type TaskSpec struct {
 
 **总结**：这一步 job controller 通过 job 的模板信息创建了对应的 pod 和 podgroup。
 
-### 同步变动信息
+### 同步信息
+
+#### 主流程
 
 上面的步骤创建了 volcanojob 对应的 pod，和 podgroup，会直接被 scheduler 监测到，然后触发 podInformer，podgroupInformer 的 addPod 和 addPodGroupV1beta1  eventHandler。
 
@@ -196,7 +220,7 @@ type TaskSpec struct {
 
 可以认为看到pod，podgroup 的创建，eventHandler 会在 schedulerCache 的 jobs 增加一个对应 jobInfo。
 
-#### 延伸
+#### scheduler初始化
 
 上面提到了 taskInfo, JobInfo, nodeInfo 等概念，这里作一下说明，顺便也对 scheduler 的启动做一些分析。
 
@@ -290,6 +314,8 @@ type SchedulerCache struct {
 ```
 
 从上面 SchedulerCache 的定义可以想象 scheduler 是通过 schedulerCache 跟集群交流的，然后一些调度必要的信息会被同步在 Jobs, Nodes, Queues, PriorityClasses 等几个 map 中，这里要注意的是这里的 jobInfo 和 taskInfo 跟上面创建的 volcanoJob  没有对应关系了，只是在 cache 中对上面 添加进来的 pod，podgroup 需要一层更上层的缓存结构。
+
+#### cacheInfo 
 
 下面是 jobInfo, taskInfo, nodeInfo, queueInfo 的结构
 
@@ -399,7 +425,9 @@ type QueueInfo struct {
 
 **总结** ：这个步骤是把集群的变动同步到 schedulerCache 不同的字典 (map) 中，方便后续调度时候使用。
 
-### 调度流程
+### 调度
+
+#### 概述
 
 调度器的主逻辑也是通过 cmd/scheduler/app/server.go 中调用 scheduler.Run 函数实现的，scheduler.Run 会通过 scheduler.cache.run 启动 schedulerCache 的 informer，然后定时调用runOnce 函数（调度流程主逻辑），下面是对应的代码段。
 
@@ -759,7 +787,11 @@ func (s *Statement) allocate(task *api.TaskInfo) error {
 
 **总结**：allocate 是volcano 调度的主流程，完成之后在所有 namespace 下的所有队列 queues 里的每个状态是 PodGroupInQueue 的 jobs 都被调度完成，或者所有 namespace 下的 queue 的元素都遍历了才会退出。后面 preempt 和 backfill 的步骤跟 allocate 有一些类似，也是会查看 session.Jobs 的元素，然后尝试去抢占或者预留，因为不是必要的步骤，这里就不继续讨论了，有兴趣的同学可以去看相关的代码。
 
-#### Plugin 机制（延伸）：
+#### 调度回顾
+
+现在我们回顾一下上一个阶段**同步信息**之后，我们在 cache 的 jobs，nodes，queues 已经有我们创建 pod 更新的信息了，这时需要等待下一个调度循环 runOnce 开始。进入下一个调度循环之后，会依次经过 OpenSession -> Enqueue -> Allocate 如果成功完成调度，这是比较简单的一个循环，也在上面进行了介绍。如果是有抢占和预留的，流程会是  OpenSession -> Enqueue -> Allocate -> Preempt -> Backfill，这个循环预留或者抢占的可能需要到下个，或者下下个循环的调度上才会用到。
+
+### Plugin机制
 
 在上面的调度流程图的右边可以看到 volcano 可以通过支持新的 action 或者 plugin 来支持不同的调度形式，前者一般是新的流程，是一个独立的步骤，可以在runOnce 调用的时候需要跟其他 action 不冲突，如支持抢占和预留就是通过新的 action 进行的；后者主要是提供不同的调度策略，我们这里以组合调度 gang plugin 进行举例说明。
 
@@ -822,9 +854,19 @@ gang plugin 相关的函数在 pkg/scheduler/plugins/gang/gang.go 中，其 OnSe
 
 整体上，gang plugins 的逻辑就是围绕着 jobInfos.MinAvailable 这个属性展开的，几个函数位点主要也是为了增加跟 jobInfos.MinAvailable 的比较条件。
 
-**总结**：volcano(kube-batch) 的 plugins 机制一定程度上增加了调度器的可扩展性，很多调用的地方不是很明显，然后如果后续引入了新的 actions 需要有新的位点，可能需要修改Session 的结构体等位置，对代码有侵入性。
+**总结**：volcano(kube-batch) 的 plugins 机制一定程度上增加了调度器的可扩展性，不过很多的函数位点没有很清楚的说明作用和调用的地方需要自己去找。然后如果后续引入了新的 actions 需要有新的位点，可能需要修改 Session 的结构体等位置，对代码有侵入性。
 
+ ## 总结
 
+volcano（kube-batch）在很大程度上补足了 kubernetes 批调度的短板，在其提供的性能测试的效果来看，基本上可以应对比较大规模集群的调度需求（千级以上）。另外，比起 kube-batch，volcano 提供了一个可扩展的 job 资源以及一系列的命令行工具方便用户从大数据和高性能计算等使用场景的迁移。整体上，volcano 应该基本能满足大多数场景下批调度的需求。
 
- 
+## 参考
+
+[Volcano](https://github.com/volcano-sh/volcano)
+
+[kube-batch](https://github.com/kubernetes-sigs/kube-batch)
+
+[Volcano架构解读](https://bbs.huaweicloud.com/blogs/239642)
+
+[Volcano 社区资料](https://bbs.huaweicloud.com/forum/thread-66929-1-1.html)
 
